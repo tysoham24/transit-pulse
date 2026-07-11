@@ -55,7 +55,7 @@ a { color:var(--acc); }
   <h2>query the warehouse (duckdb in your browser)</h2>
   <textarea id="sql">SELECT route, max(active) AS peak_trains
 FROM snapshots
-WHERE snapshot_ts >= now() - INTERVAL 1 DAY
+WHERE snapshot_ts >= now()::TIMESTAMP - INTERVAL '1 day'
 GROUP BY route ORDER BY peak_trains DESC LIMIT 10;</textarea>
   <button id="run">run sql</button>
   <div id="out"></div>
@@ -116,7 +116,7 @@ async function drawHistory(route) {
   const res = await conn.query(`
     SELECT snapshot_ts, active FROM snapshots
     WHERE route = '${route.replace(/'/g, "")}'
-      AND snapshot_ts >= now() - INTERVAL 1 DAY
+      AND snapshot_ts >= now()::TIMESTAMP - INTERVAL '1 day'
     ORDER BY snapshot_ts`);
   const rows = res.toArray().map(r => ({ t: Number(r.snapshot_ts), v: Number(r.active) }));
   const svg = $("chart");
