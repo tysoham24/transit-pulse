@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Transit Pulse · live NYC subway ops</title>
+<style>
+:root { --bg:#07090e; --panel:#101623; --border:#1f2b3f; --text:#e3eaf4; --muted:#8b9db4; --acc:#3fd0ff; --acc2:#7dffb0; --mono:ui-monospace,Menlo,Consolas,monospace; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--text); font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+.wrap { max-width:960px; margin:0 auto; padding:36px 20px 70px; }
+h1 { font-size:1.7rem; margin:0; letter-spacing:-.02em; }
+h1 span { color:var(--acc); }
+.sub { color:var(--muted); margin:4px 0 0; font-family:var(--mono); font-size:.85rem; }
+.status { display:flex; gap:18px; flex-wrap:wrap; margin:26px 0; }
+.kpi { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:14px 20px; min-width:150px; }
+.kpi b { display:block; font-size:1.5rem; font-family:var(--mono); color:var(--acc); }
+.kpi span { color:var(--muted); font-size:.78rem; }
+h2 { font-size:.85rem; text-transform:uppercase; letter-spacing:.12em; color:var(--acc2); font-family:var(--mono); margin:34px 0 14px; }
+#bars { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:10px; }
+.bar { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:10px 12px; cursor:pointer; transition:border-color .15s; }
+.bar:hover, .bar.sel { border-color:var(--acc); }
+.bar .r { font-family:var(--mono); font-weight:700; }
+.bar .n { color:var(--muted); font-size:.78rem; }
+.bar .track { height:6px; background:#0a0f18; border-radius:4px; margin-top:8px; overflow:hidden; }
+.bar .fill { height:100%; background:linear-gradient(90deg,var(--acc),var(--acc2)); }
+#chart { width:100%; height:auto; background:var(--panel); border:1px solid var(--border); border-radius:10px; }
+#sql { width:100%; background:var(--panel); color:var(--text); border:1px solid var(--border); border-radius:8px; font:13px var(--mono); padding:12px; min-height:70px; }
+button { background:transparent; color:var(--acc); border:1px solid var(--acc); border-radius:7px; padding:7px 16px; font:13px var(--mono); cursor:pointer; margin-top:8px; }
+button:hover { background:rgba(63,208,255,.1); }
+table { border-collapse:collapse; width:100%; font:12.5px var(--mono); margin-top:12px; }
+th,td { border:1px solid var(--border); padding:5px 9px; text-align:left; }
+th { color:var(--acc2); }
+.note { color:var(--muted); font-size:.8rem; font-family:var(--mono); }
+a { color:var(--acc); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>transit<span>pulse</span></h1>
+  <p class="sub">live NYC subway fleet · zero servers · <a href="https://github.com/tysoham24/transit-pulse">how it works</a></p>
+
+  <div class="status">
+    <div class="kpi"><b id="k-active">–</b><span>trains active now</span></div>
+    <div class="kpi"><b id="k-routes">–</b><span>routes reporting</span></div>
+    <div class="kpi"><b id="k-fresh">–</b><span>snapshot age</span></div>
+  </div>
+
+  <h2>active trains by line <span class="note">(click a line for its 24h history)</span></h2>
+  <div id="bars"></div>
+
+  <h2 id="chart-title">24h history</h2>
+  <svg id="chart" viewBox="0 0 900 240" preserveAspectRatio="none"></svg>
+
+  <h2>query the warehouse (duckdb in your browser)</h2>
+  <textarea id="sql">SELECT route, max(active) AS peak_trains
+FROM snapshots
+WHERE snapshot_ts >= now() - INTERVAL 1 DAY
+GROUP BY route ORDER BY peak_trains DESC LIMIT 10;</textarea>
+  <button id="run">run sql</button>
+  <div id="out"></div>
+  <p class="note" id="db-status">loading duckdb-wasm…</p>
+</div>
+
+<script type="module">
+const $ = id => document.getElementById(id);
+const fmtAge = iso => {
+  const m = Math.round((Date.now() - new Date(iso)) / 60000);
+  return m < 1 ? "just now" : m + " min";
+};
+
+/* instant paint from latest.json */
+let latest = null;
+try {
+  latest = await (await fetch("../data/latest.json", { cache: "no-store" })).json();
+  $("k-active").textContent = latest.total_active;
+  $("k-routes").textContent = latest.routes.length;
+  $("k-fresh").textContent = fmtAge(latest.ts);
+  const max = Math.max(...latest.routes.map(r => r.active));
+  $("bars").innerHTML = latest.routes.map(r => `
+    <div class="bar" data-route="${r.route}">
+      <span class="r">${r.route}</span> <span class="n">${r.active} active · ${r.stopped} at station</span>
+      <div class="track"><div class="fill" style="width:${(r.active / max * 100).toFixed(0)}%"></div></div>
+    </div>`).join("");
+} catch (e) {
+  $("db-status").textContent = "no data yet: run the ingest once (see README)";
+}
+
+/* duckdb-wasm over the parquet warehouse */
+import * as duckdb from "https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.28.0/+esm";
+let conn = null;
+try {
+  const bundles = duckdb.getJsDelivrBundles();
+  const bundle = await duckdb.selectBundle(bundles);
+  const worker = new Worker(URL.createObjectURL(
+    new Blob([`importScripts("${bundle.mainWorker}");`], { type: "text/javascript" })));
+  const db = new duckdb.AsyncDuckDB(new duckdb.ConsoleLogger(duckdb.LogLevel.WARNING), worker);
+  await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+  conn = await db.connect();
+
+  const manifest = await (await fetch("../data/manifest.json", { cache: "no-store" })).json();
+  const urls = manifest.files.map(f => `'${new URL("../data/" + f, location.href).href}'`);
+  await conn.query(`CREATE VIEW snapshots AS
+    SELECT route, active, stopped, in_transit, snapshot_ts::TIMESTAMPTZ AS snapshot_ts
+    FROM read_parquet([${urls.join(",")}])`);
+  $("db-status").textContent = `duckdb ready · ${manifest.files.length} parquet partition(s) mounted`;
+  if (latest?.routes?.length) drawHistory(latest.routes[0].route);
+} catch (e) {
+  $("db-status").textContent = "duckdb unavailable (" + e.message + "); headline stats still live";
+}
+
+async function drawHistory(route) {
+  if (!conn) return;
+  $("chart-title").textContent = `24h history · line ${route}`;
+  document.querySelectorAll(".bar").forEach(b => b.classList.toggle("sel", b.dataset.route === route));
+  const res = await conn.query(`
+    SELECT snapshot_ts, active FROM snapshots
+    WHERE route = '${route.replace(/'/g, "")}'
+      AND snapshot_ts >= now() - INTERVAL 1 DAY
+    ORDER BY snapshot_ts`);
+  const rows = res.toArray().map(r => ({ t: Number(r.snapshot_ts), v: Number(r.active) }));
+  const svg = $("chart");
+  if (!rows.length) { svg.innerHTML = '<text x="20" y="40" fill="#8b9db4" font-size="13">no history yet, check back after a few snapshots</text>'; return; }
+  const xs = rows.map(r => r.t), ys = rows.map(r => r.v);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y1 = Math.max(...ys) || 1;
+  const X = t => 20 + (t - x0) / Math.max(1, x1 - x0) * 860;
+  const Y = v => 220 - v / y1 * 190;
+  const path = rows.map((r, i) => (i ? "L" : "M") + X(r.t).toFixed(1) + "," + Y(r.v).toFixed(1)).join(" ");
+  svg.innerHTML = `
+    <path d="${path} L${X(x1)},220 L${X(x0)},220 Z" fill="rgba(63,208,255,.12)"/>
+    <path d="${path}" fill="none" stroke="#3fd0ff" stroke-width="2"/>
+    <text x="20" y="18" fill="#7dffb0" font-size="11" font-family="monospace">peak ${y1} trains</text>`;
+}
+$("bars").addEventListener("click", e => {
+  const bar = e.target.closest(".bar");
+  if (bar) drawHistory(bar.dataset.route);
+});
+
+$("run").onclick = async () => {
+  if (!conn) { $("out").innerHTML = '<p class="note">duckdb not loaded</p>'; return; }
+  try {
+    const res = await conn.query($("sql").value);
+    const cols = res.schema.fields.map(f => f.name);
+    const rows = res.toArray().slice(0, 200);
+    $("out").innerHTML = "<table><tr>" + cols.map(c => `<th>${c}</th>`).join("") + "</tr>" +
+      rows.map(r => "<tr>" + cols.map(c => `<td>${r[c]}</td>`).join("") + "</tr>").join("") + "</table>";
+  } catch (e) { $("out").innerHTML = `<p class="note">error: ${e.message}</p>`; }
+};
+</script>
+</body>
+</html>
